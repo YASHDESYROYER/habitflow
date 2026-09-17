@@ -1,6 +1,7 @@
 'use client'
 
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import { supabase } from '@/lib/supabase'
 
 const accentOptions = [
   { name: 'Emerald', value: '#28c58b' },
@@ -27,6 +28,13 @@ export default function Page() {
   const [showSettings, setShowSettings] = useState(false)
   const [activeTab, setActiveTab] = useState('Dashboard')
   const [newHabit, setNewHabit] = useState({ name: '', icon: '✦', category: 'Health' })
+  const [userEmail, setUserEmail] = useState<string | null>(null)
+  const [authMode, setAuthMode] = useState<'sign-in' | 'sign-up'>('sign-in')
+  const [showAuth, setShowAuth] = useState(false)
+  const [authEmail, setAuthEmail] = useState('')
+  const [authPassword, setAuthPassword] = useState('')
+  const [authMessage, setAuthMessage] = useState('')
+  const [syncing, setSyncing] = useState(false)
 
   const totalDays = habits.length * 30
   const completedDays = habits.reduce((sum, habit) => sum + habit.days.filter(Boolean).length, 0)
@@ -37,13 +45,65 @@ export default function Page() {
   const dates = Array.from({ length: 30 }, (_, index) => index + 1)
   const chartPoints = useMemo(() => [62, 70, 58, 78, 72, 86, 82, 92, 88, 95, 90, 96, 93, 100], [])
 
+  useEffect(() => {
+    if (!supabase) return
+    let active = true
+    supabase.auth.getSession().then(async ({ data }) => {
+      if (!active) return
+      const session = data.session
+      setUserEmail(session?.user.email ?? null)
+      if (session) {
+        const { data: saved } = await supabase.from('habit_data').select('data').eq('user_id', session.user.id).maybeSingle()
+        if (saved?.data) {
+          setHabits(saved.data.habits ?? seedHabits)
+          setAccent(saved.data.accent ?? '#28c58b')
+          setDark(saved.data.dark ?? true)
+        }
+      }
+    })
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => setUserEmail(session?.user.email ?? null))
+    return () => { active = false; listener.subscription.unsubscribe() }
+  }, [])
+
+  async function syncData(nextHabits = habits, nextAccent = accent, nextDark = dark) {
+    if (!supabase || !userEmail) return
+    const { data: sessionData } = await supabase.auth.getSession()
+    const user = sessionData.session?.user
+    if (!user) return
+    setSyncing(true)
+    await supabase.from('habit_data').upsert({ user_id: user.id, data: { habits: nextHabits, goals: [], accent: nextAccent, dark: nextDark }, updated_at: new Date().toISOString() })
+    setSyncing(false)
+  }
+
+  async function submitAuth() {
+    if (!supabase) { setAuthMessage('Supabase is not configured yet.'); return }
+    setAuthMessage('')
+    const result = authMode === 'sign-in'
+      ? await supabase.auth.signInWithPassword({ email: authEmail, password: authPassword })
+      : await supabase.auth.signUp({ email: authEmail, password: authPassword })
+    if (result.error) setAuthMessage(result.error.message)
+    else {
+      setUserEmail(result.data.user?.email ?? authEmail)
+      setShowAuth(false)
+      setAuthMessage(authMode === 'sign-up' ? 'Check your email to confirm your account.' : '')
+    }
+  }
+
   function toggleHabit(habitId: number, day: number) {
-    setHabits((current) => current.map((habit) => habit.id === habitId ? { ...habit, days: habit.days.map((value, index) => index === day ? !value : value) } : habit))
+    setHabits((current) => {
+      const next = current.map((habit) => habit.id === habitId ? { ...habit, days: habit.days.map((value, index) => index === day ? !value : value) } : habit)
+      void syncData(next)
+      return next
+    })
   }
 
   function addHabit() {
     if (!newHabit.name.trim()) return
-    setHabits((current) => [...current, { id: Date.now(), name: newHabit.name, icon: newHabit.icon || '✦', category: newHabit.category, color: accent, streak: 0, best: 0, progress: 0, days: Array(30).fill(false) }])
+    setHabits((current) => {
+      const next = [...current, { id: Date.now(), name: newHabit.name, icon: newHabit.icon || '✦', category: newHabit.category, color: accent, streak: 0, best: 0, progress: 0, days: Array(30).fill(false) }]
+      void syncData(next)
+      return next
+    })
     setNewHabit({ name: '', icon: '✦', category: 'Health' })
     setShowModal(false)
   }
@@ -60,7 +120,7 @@ export default function Page() {
       </aside>
 
       <section className="content">
-        <header className="topbar"><div className="breadcrumb"><span>Workspace</span><b>/</b><strong>{activeTab}</strong></div><div className="header-actions"><button className="icon-button" aria-label="Toggle theme" onClick={() => setDark(!dark)}>{dark ? '☼' : '☾'}</button><button className="icon-button" aria-label="Notifications">♧</button><button className="add-button" onClick={() => setShowModal(true)}><span>+</span> Add habit</button></div></header>
+        <header className="topbar"><div className="breadcrumb"><span>Workspace</span><b>/</b><strong>{activeTab}</strong></div><div className="header-actions"><span className="sync-status">{syncing ? 'Saving…' : userEmail ? `Synced as ${userEmail}` : 'Local mode'}</span><button className="auth-button" onClick={async () => userEmail ? await supabase?.auth.signOut() : setShowAuth(true)}>{userEmail ? 'Sign out' : 'Sign in'}</button><button className="icon-button" aria-label="Toggle theme" onClick={() => { setDark(!dark); void syncData(habits, accent, !dark) }}>{dark ? '☼' : '☾'}</button><button className="icon-button" aria-label="Notifications">♧</button><button className="add-button" onClick={() => setShowModal(true)}><span>+</span> Add habit</button></div></header>
 
         {activeTab === 'Dashboard' ? <>
           <section className="hero"><div><p className="eyebrow">THURSDAY, SEPTEMBER 14, 2026</p><h1>Good morning, Alex <span>✦</span></h1><p className="hero-copy">You&apos;re building something great. Keep your rhythm going.</p></div><button className="month-picker">September 2026 <span>⌄</span></button></section>
@@ -75,6 +135,7 @@ export default function Page() {
 
       {showSettings && <div className="modal-backdrop" onClick={() => setShowSettings(false)}><div className="modal settings-modal" onClick={(event) => event.stopPropagation()}><div className="modal-header"><div><p className="eyebrow">PREFERENCES</p><h2>Appearance</h2></div><button onClick={() => setShowSettings(false)}>×</button></div><p className="modal-subtitle">Make HabitFlow feel like yours.</p><div className="theme-options">{['Light', 'Dark', 'System'].map((mode) => <button className={(mode === 'Dark') === dark ? 'selected' : ''} onClick={() => setDark(mode === 'Dark')} key={mode}>{mode}</button>)}</div><label>Accent color</label><div className="swatches">{accentOptions.map((option) => <button aria-label={option.name} className={accent === option.value ? 'selected' : ''} style={{ background: option.value }} onClick={() => setAccent(option.value)} key={option.name} />)}<input type="color" value={accent} onChange={(event) => setAccent(event.target.value)} /></div><button className="secondary-action" onClick={() => setShowSettings(false)}>Done</button></div></div>}
       {showModal && <div className="modal-backdrop" onClick={() => setShowModal(false)}><div className="modal" onClick={(event) => event.stopPropagation()}><div className="modal-header"><div><p className="eyebrow">NEW ROUTINE</p><h2>Create a habit</h2></div><button onClick={() => setShowModal(false)}>×</button></div><p className="modal-subtitle">Choose one small action to keep showing up for.</p><label htmlFor="habit-name">Habit name</label><input id="habit-name" autoFocus placeholder="e.g. Read for 20 minutes" value={newHabit.name} onChange={(event) => setNewHabit({ ...newHabit, name: event.target.value })} onKeyDown={(event) => { if (event.key === 'Enter') addHabit() }} /><label htmlFor="habit-icon">Icon</label><input id="habit-icon" value={newHabit.icon} maxLength={2} onChange={(event) => setNewHabit({ ...newHabit, icon: event.target.value })} /><label htmlFor="habit-category">Category</label><select id="habit-category" value={newHabit.category} onChange={(event) => setNewHabit({ ...newHabit, category: event.target.value })}>{['Health', 'Study', 'Fitness', 'Personal', 'Productivity', 'Other'].map((category) => <option key={category}>{category}</option>)}</select><button className="add-button modal-submit" onClick={addHabit}>Create habit <span>→</span></button></div></div>}
+      {showAuth && <div className="modal-backdrop" onClick={() => setShowAuth(false)}><div className="modal auth-modal" onClick={(event) => event.stopPropagation()}><div className="modal-header"><div><p className="eyebrow">YOUR PRIVATE SPACE</p><h2>{authMode === 'sign-in' ? 'Welcome back' : 'Create your account'}</h2></div><button onClick={() => setShowAuth(false)}>×</button></div><p className="modal-subtitle">Sign in to sync your habits across devices.</p><label htmlFor="auth-email">Email</label><input id="auth-email" type="email" autoFocus value={authEmail} onChange={(event) => setAuthEmail(event.target.value)} placeholder="you@example.com" /><label htmlFor="auth-password">Password</label><input id="auth-password" type="password" value={authPassword} onChange={(event) => setAuthPassword(event.target.value)} placeholder="At least 6 characters" onKeyDown={(event) => { if (event.key === 'Enter') void submitAuth() }} />{authMessage && <p className="auth-message">{authMessage}</p>}<button className="add-button modal-submit" onClick={() => void submitAuth()}>{authMode === 'sign-in' ? 'Sign in' : 'Create account'} <span>→</span></button><button className="auth-switch" onClick={() => { setAuthMode(authMode === 'sign-in' ? 'sign-up' : 'sign-in'); setAuthMessage('') }}>{authMode === 'sign-in' ? 'Need an account? Sign up' : 'Already have an account? Sign in'}</button></div></div>}
       <button className="mobile-add" onClick={() => setShowModal(true)}>+</button>
     </main>
   )
